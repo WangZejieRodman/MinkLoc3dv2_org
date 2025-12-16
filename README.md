@@ -20,19 +20,44 @@
   * PyTorch \>= 1.7
   * **MinkowskiEngine** (用于稀疏卷积)
   * NumPy, Pandas, Scipy, Sklearn
-  * Open3D (可选，用于可视化)
 
 ## 📂 数据集准备
 
-本项目严重依赖正确的数据路径配置。由于代码中包含硬编码路径（如 `/home/wzj/...`），**请务必在使用前修改相关路径**。
+本项目严重依赖正确的数据路径和索引文件配置。
 
-### 1\. 数据存放
+### 1\. 数据存放结构
 
-请确保你的智利矿井数据集（`.bin` 格式点云）已按 Session 文件夹存放。
+智利矿井数据集应按 Session (采集架次) 文件夹存放。每个 Session 文件夹下**必须**包含点云文件夹和位置索引 CSV 文件。
 
-### 2\. 生成训练与测试索引
+推荐的目录结构如下：
 
-在使用模型前，需要生成用于检索的正负样本对索引文件（Pickle格式）。
+```text
+/path/to/dataset/
+└── chilean_NoRot_NoScale/       # 数据集根目录 (RUNS_FOLDER)
+    ├── 100/                     # Session ID
+    │   ├── pointcloud_20m_10overlap/        # 存放 .bin 点云文件
+    │   └── pointcloud_locations_20m_10overlap.csv  # 关键索引文件
+    ├── 101/
+    │   ├── ...
+    └── ...
+```
+
+### 2\. 关键文件说明：pointcloud\_locations\_20m\_10overlap.csv
+
+这是一个至关重要的索引文件，脚本会根据它来读取点云并确定其物理位置。**每个 Session 文件夹下都必须有这个文件。**
+
+  * **作用**: 将点云文件名与物理坐标（Northing, Easting）关联，用于计算点云之间的距离，从而生成训练所需的正样本（Positives）和负样本（Negatives）。
+  * **必需列 (Columns)**:
+      * `timestamp`: 对应点云的文件名（不含后缀）。脚本会自动拼接为 `.bin` 文件路径。
+      * `northing`: UTM 坐标 Y 轴。
+      * `easting`: UTM 坐标 X 轴。
+  * **使用方式**:
+      * `generate_training_tuples_chilean.py` 和 `generate_test_sets_chilean.py` 脚本会读取该文件。
+      * 脚本利用 `northing` 和 `easting` 构建 KDTree，以检索距离当前点云 7米以内（正样本）或 35米以外（负样本）的其他点云。
+
+### 3\. 生成训练与测试索引
+
+在使用模型前，必须先运行以下脚本生成 Pickle 格式的索引文件。
 
 **步骤 A: 生成训练元组 (Training Tuples)**
 运行脚本以划分训练集 (Session 100-159) 和测试集，并生成查询字典。
@@ -41,8 +66,8 @@
 python datasets/chilean/generate_training_tuples_chilean.py
 ```
 
-  * **输出**: `training_queries_chilean.pickle`, `test_queries_chilean.pickle`
-  * **注意**: 请检查脚本中的 `BASE_PATH` 和 `RUNS_FOLDER` 变量。
+  * **输入**: 读取每个 Session 下的 `pointcloud_locations_20m_10overlap.csv`。
+  * **输出**: `datasets/chilean/training_queries_chilean.pickle` (包含训练用的锚点、正样本、负样本索引)。
 
 **步骤 B: 生成评估数据集 (Evaluation Sets)**
 运行脚本以构建用于最终评估的 Database (历史地图, Session 160-189) 和 Query (当前观测, Session 190-209)。
@@ -51,11 +76,12 @@ python datasets/chilean/generate_training_tuples_chilean.py
 python datasets/chilean/generate_test_sets_chilean.py
 ```
 
-  * **输出**: `chilean_evaluation_database_*.pickle`, `chilean_evaluation_query_*.pickle`
+  * **输入**: 同样依赖 `pointcloud_locations_20m_10overlap.csv` 来确定 Database 和 Query 的真值位置。
+  * **输出**: `datasets/chilean/chilean_evaluation_database_*.pickle` 和 `query_*.pickle`。
 
 ## 🚀 训练 (Training)
 
-使用以下命令开始训练模型。训练脚本会自动加载配置并进行模型优化。
+使用以下命令开始训练模型。
 
 ```bash
 cd training
@@ -63,11 +89,10 @@ python train_chilean.py
 ```
 
   * **配置文件**: `config/config_chilean_baseline.txt`
+      * 请务必修改配置文件中的 `dataset_folder` 为你的实际数据路径。
       * 默认 Batch Size: 128
       * Loss: TruncatedSmoothAP
-      * 优化器: Adam
-  * **模型结构**: 定义在 `models/minkloc3dv2.txt`
-  * **日志**: 训练日志将保存至 `training/trainer.log`，权重保存至 `weights/` 目录。
+  * **日志**: 训练日志将保存至 `training/trainer.log`。
 
 ## 📊 评估 (Evaluation)
 
@@ -94,63 +119,24 @@ python evaluate_chilean_rotation.py
 
   * 运行结束后，可使用 `python analyze_rotation_results.py` 生成详细的文本报告 (`rotation_results.txt`)。
 
-## 📁 项目结构说明
-
-```text
-.
-├── config/
-│   └── config_chilean_baseline.txt    # 训练超参数配置文件
-├── datasets/
-│   ├── base_datasets.py               # 数据集基类
-│   ├── augmentation.py                # 数据增强 (旋转, 翻转, 抖动)
-│   ├── quantization.py                # 点云量化 (体素化)
-│   ├── samplers.py                    # Batch Sampler (确保Batch内包含正样本对)
-│   ├── chilean/                       # 智利数据集专用脚本
-│   │   ├── generate_training_tuples_chilean.py
-│   │   └── generate_test_sets_chilean.py
-│   └── pointnetvlad/
-│       ├── pnv_raw.py                 # 原始点云加载器 (不移除地面)
-│       └── pnv_train.py               # 训练集特定Transform
-├── models/
-│   ├── minkloc.py                     # 模型主入口
-│   ├── minkfpn.py                     # 特征金字塔网络 (Backbone)
-│   ├── minkloc3dv2.txt                # 模型结构定义
-│   └── layers/                        # 网络层 (Pooling, ECA Block, NetVLAD)
-│   └── losses/                        # 损失函数 (TruncatedSmoothAP, Triplet)
-├── training/
-│   ├── train_chilean.py               # 训练启动脚本
-│   └── trainer.py                     # 训练循环核心逻辑
-├── eval/
-│   ├── evaluate_chilean.py            # 标准评估脚本
-│   ├── evaluate_chilean_rotation.py   # 旋转鲁棒性评估
-│   └── analyze_rotation_results.py    # 旋转结果分析
-└── misc/
-    └── utils.py                       # 工具函数
-```
-
 ## ⚙️ 关键配置修改指南
 
 在运行代码前，请检查以下文件中的**绝对路径**设置：
 
-1.  **`config/config_chilean_baseline.txt`**:
+1.  **`datasets/chilean/generate_training_tuples_chilean.py`** & **`generate_test_sets_chilean.py`**:
+
+      * `BASE_PATH`: 修改为你的数据集根目录 (例如 `/data/Chilean_Dataset/`)。
+      * `FILENAME`: 确认为 `"pointcloud_locations_20m_10overlap.csv"`。
+
+2.  **`config/config_chilean_baseline.txt`**:
 
       * `dataset_folder`: 指向数据集根目录。
-      * `train_file` / `val_file`: 指向生成的 pickle 文件路径。
-
-2.  **`datasets/chilean/*.py`**:
-
-      * `BASE_PATH`: 数据集存放位置。
+      * `train_file`: 指向生成的 `training_queries_chilean.pickle` 的绝对路径。
 
 3.  **`datasets/pointnetvlad/pnv_raw.py`**:
 
-      * `self.log_file`: 日志输出路径。
-
-4.  **`training/train_chilean.py`** 和 **`eval/*.py`**:
-
-      * `args.weights`: 确保指向正确的模型权重文件。
+      * `self.log_file`: 修改为你希望保存数据加载日志的路径。
 
 ## 📝 引用
 
 本项目代码基于 [MinkLoc3Dv2](https://github.com/jac99/MinkLoc3Dv2) 进行二次开发。
-
-如果你在研究中使用了此代码，请引用原始 MinkLoc3D 论文以及相关数据集论文。
